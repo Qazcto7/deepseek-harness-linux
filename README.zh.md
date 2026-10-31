@@ -1,8 +1,13 @@
-# DeepSeek Harness
+# DeepSeek Harness · Linux 桌面端
 
 [English](README.md) | 中文
 
-DeepSeek Harness（`dsh`）是由 [DeepSeek AI](https://deepseek.com) 开发的开源 agent harness（智能体框架）。
+> **本仓库说明**：这是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的下游社区项目，专注于 Linux 桌面端打包适配。官方桌面端仅提供 macOS / Windows，本仓库在此基础上新增 Linux（x64 / ARM64）的 AppImage / .deb / .tar.gz 打包与自动构建。agent 内核、插件体系等核心功能均来自上游，本仓库不做修改。
+
+
+DeepSeek Harness（`dsh`）是由 [DeepSeek AI](https://deepseek.com) 开发的开源 agent harness（智能体框架 / AI 智能体）。
+
+它既可以通过 `npx @deepseek-ai/dsh web` 在本机一键拉起 Web UI 自托管运行，也可以在 Linux（Ubuntu 24.04 / Debian / 树莓派 5 / ARM 服务器）上打包成桌面客户端（AppImage / `.deb` / `.tar.gz`）使用 —— 一个开源、可本地部署的 DeepSeek 客户端与 AI 助手框架。
 
 它构建于**一切皆插件**的架构之上，由 [Cordis](https://github.com/cordiverse/cordis) 驱动，其设计参见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512)。
 
@@ -35,14 +40,27 @@ npx @deepseek-ai/dsh web
 如需从仓库源码运行：
 
 ```sh
-git clone https://github.com/deepseek-ai/deepseek-harness.git
-cd deepseek-harness
+git clone https://github.com/Qazcto7/deepseek-harness-linux.git
+cd deepseek-harness-linux
 pnpm install
 pnpm run build
 pnpm dsh web
 ```
 
 `pnpm run build` 会准备仓库产物。`pnpm dsh web` 会直接使用这些已构建产物，不会重新构建。
+
+### Linux 桌面端（本仓库新增）
+
+桌面应用可在 Ubuntu 24.04（或兼容发行版）上打包，支持两种架构（x64/ARM64），每种架构产出三种安装格式（AppImage、Debian `.deb`、便携 `.tar.gz`）：
+
+```sh
+pnpm install
+cp apps/desktop/.env.linux.example apps/desktop/.env.linux   # 然后填入发布配置
+pnpm --dir apps/desktop run package:linux:x64                # x64（AMD/Intel）：AppImage + deb + tar.gz
+pnpm --dir apps/desktop run package:linux:arm64              # ARM64：AppImage + deb + tar.gz
+```
+
+打包 AppImage 时构建机需要 FUSE 2（`libfuse2`）；`.deb` 打包需要 maintainer 字段（Linux 配置中已内置）。Linux 构建不做代码签名：自动更新走 `electron-updater` 的 AppImage 渠道，链路依赖 HTTPS 与 `nightly-linux.yml` 元数据、无签名校验，若要向第三方分发，这是需要评估的供应链环节。`.deb` 与 `.tar.gz` 作为同版本安装包一并发布。仓库内置 `Desktop (Linux)` 工作流可在原生双架构 runner 上一键构建。发布版本号、上传与各平台环境变量文件详见[桌面端打包说明](apps/desktop/README.md)。
 
 ## 社区与支持
 
@@ -88,6 +106,14 @@ pnpm dsh web
   howpublished={\url{https://github.com/deepseek-ai/deepseek-harness}},
 }
 ```
+
+## 如果你在搜索这些词
+
+- **DeepSeek Linux** / **DeepSeek 桌面端 Linux** / **DeepSeek on Linux**
+- **DeepSeek 客户端下载** / **DeepSeek 桌面客户端** / **DeepSeek 安装包**
+- **DeepSeek AppImage** / **DeepSeek .deb** / **Ubuntu 安装 DeepSeek** / **Debian DeepSeek**
+- **树莓派 DeepSeek** / **ARM64 DeepSeek** / **DeepSeek Linux 安装**
+- **开源 DeepSeek** / **本地部署 DeepSeek** / **自托管 AI 助手** / **DeepSeek 智能体**
 
 ## 许可证
 

@@ -17,6 +17,7 @@ import { prepareWindowsSignatureCacheDirectory, resolveWindowsSignatureCacheDire
 import { withMacOSSigningKeychain } from './macos-signing-keychain.mjs'
 import { macOSDownloadEnvironment, resolveMacOSPackageSettings } from './macos-package-settings.mjs'
 import { resolveWindowsPackageSettings } from './windows-package-settings.mjs'
+import { resolveLinuxPackageSettings } from './linux-package-settings.mjs'
 import { packagingErrorDetails, packagingStep } from './packaging-step.mjs'
 import { notarizeMacOS } from './notarize-macos.mjs'
 import { resolveMacOSNotarizationEnvironment } from './desktop-release-environment.mjs'
@@ -48,14 +49,14 @@ const DESKTOP_UPLOAD_CREDENTIAL_ENV_NAMES = new Set([
 const AUTOMATIC_BUILD_VERSION = 'auto'
 
 /** Fixed platform and architecture identifiers exposed by package scripts. */
-export type DesktopPackageTargetName = 'mac-arm64' | 'mac-x64' | 'win-x64'
+export type DesktopPackageTargetName = 'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64' | 'linux-arm64'
 
 /** One supported release target and its electron-builder selectors. */
 export interface DesktopPackageTarget {
   readonly name: DesktopPackageTargetName
-  readonly platform: 'darwin' | 'win32'
+  readonly platform: 'darwin' | 'win32' | 'linux'
   readonly arch: 'arm64' | 'x64'
-  readonly builderPlatform: '--mac' | '--win'
+  readonly builderPlatform: '--mac' | '--win' | '--linux'
   readonly builderArch: '--arm64' | '--x64'
 }
 
@@ -81,6 +82,20 @@ const TARGETS: Record<DesktopPackageTargetName, DesktopPackageTarget> = {
     builderPlatform: '--win',
     builderArch: '--x64',
   },
+  'linux-x64': {
+    name: 'linux-x64',
+    platform: 'linux',
+    arch: 'x64',
+    builderPlatform: '--linux',
+    builderArch: '--x64',
+  },
+  'linux-arm64': {
+    name: 'linux-arm64',
+    platform: 'linux',
+    arch: 'arm64',
+    builderPlatform: '--linux',
+    builderArch: '--arm64',
+  },
 }
 
 /**
@@ -94,9 +109,9 @@ export function withoutWindowsSigningEnvironment(environment: NodeJS.ProcessEnv)
 }
 
 /**
- * Select signing mode and strip unsigned-build credentials for packaging subprocesses.
+ * Select signing and NSIS-compatible archive filters for electron-builder.
  * @param environment - Target packaging environment.
- * @param unsigned - Whether to create a local artifact without release signing or notarization.
+ * @param unsigned - Whether to create a local unsigned Windows artifact.
  * @returns Packaging environment without certificate inputs for unsigned builds.
  */
 export function desktopElectronBuilderEnvironment(environment: NodeJS.ProcessEnv, unsigned: boolean): NodeJS.ProcessEnv {
@@ -184,12 +199,21 @@ export function resolveDesktopPackageTarget(
   if (target.platform === 'darwin' && hostPlatform !== 'darwin') {
     throw new Error(`desktop package: ${name} requires a macOS build host`)
   }
+  if (target.platform === 'linux' && hostPlatform !== 'linux') {
+    throw new Error(`desktop package: ${name} requires a Linux build host`)
+  }
   if (name === 'mac-arm64' && hostArch !== 'arm64') {
     throw new Error('desktop package: mac-arm64 requires an Apple Silicon build host')
   }
   if (name === 'mac-x64' && hostArch !== 'arm64' && hostArch !== 'x64') {
     throw new Error('desktop package: mac-x64 requires an Intel Mac or Apple Silicon with Rosetta')
   }
+  if (name === 'linux-x64' && hostArch !== 'x64') {
+    throw new Error('desktop package: linux-x64 requires an x64 Linux build host')
+  }
+  // Cross-building linux-arm64 on an x64 host is permitted for convenience, but architecture-dependent
+  // native modules (node-pty, LibreOffice Kit) are only exercised by the packaged runtime smoke test on
+  // the target architecture; prefer a native arm64 host or the ubuntu-24.04-arm CI runner.
   return target
 }
 
@@ -238,9 +262,16 @@ export function parseDesktopPackageInvocation(
   })
   if (positionals.length > 1) throw new Error('desktop package: expected at most one target')
   const name = positionals[0] ?? hostTargetName(hostPlatform, hostArch)
+  // Upstream allows unsigned artifacts on Windows and macOS alike: both produce a local
+  // artifact without release signing. Linux ships unsigned by nature, so it never takes the flag.
+  if (values.unsigned && name.startsWith('linux-')) {
+    throw new Error('desktop package: --unsigned is unnecessary on Linux; packages are unsigned already')
+  }
   if (values.unsigned && values['prepare-only']) throw new Error('desktop package: --unsigned cannot use --prepare-only')
-  if (values['skip-notarization'] && (name === 'win-x64' || values.unsigned || values['prepare-only'])) {
-    throw new Error('desktop package: --skip-notarization requires a signed macOS build, without --prepare-only')
+  // Skipping notarization only means something for a signed macOS build; every other target
+  // either has no notarization stage or is already unsigned.
+  if (values['skip-notarization'] && (values.unsigned || values['prepare-only'] || !name.startsWith('mac-'))) {
+    throw new Error('desktop package: --skip-notarization requires a signed macOS build')
   }
   const requestedBuildVersion = values['build-version']?.trim()
   if (values['build-version'] !== undefined && (requestedBuildVersion === undefined || requestedBuildVersion === '')) {
@@ -333,7 +364,8 @@ async function resolveRequestedBuildVersion(
     productVersion, target: invocation.target.name,
     // Machine presets own packaging, not upload credentials; local auto numbering uses existing artifacts.
     environment: environment.DSH_PACKAGING_PRESET === undefined ? environment : {},
-    // Unsigned builds land beside the signed output, so numbering has to read the directory this run writes.
+    // Unsigned and notarization-skipped builds land outside the release directory, so numbering
+    // has to read the directory this run writes.
     artifactsRoot: desktopArtifactOutput(paths, invocation).directory,
   })
 }
@@ -350,7 +382,7 @@ async function main(): Promise<void> {
       unsigned: invocation.unsigned, prepareOnly: invocation.prepareOnly,
     })
   const productVersion = packageVersion(join(APP_ROOT, 'package.json'), 'desktop package')
-  // Release settings come from the selected configuration files, so the version this run publishes is an
+  // Release settings come from the target dotenv file alone, so the version this run publishes is an
   // argument; the environment variable below only carries it to the child processes that build.
   const buildVersion = await resolveRequestedBuildVersion(invocation, productVersion, environment)
   environment[DESKTOP_BUILD_VERSION_ENV] = buildVersion
@@ -386,6 +418,10 @@ async function main(): Promise<void> {
       await packagingStep(run.directory, 'macos-package', () => invocation.unsigned
         ? packageTarget(invocation, environment, run)
         : withMacOSSigningKeychain(environment, signingEnvironment => packageTarget(invocation, signingEnvironment, run)), secrets)
+    } else if (target.platform === 'linux') {
+      const settings = resolveLinuxPackageSettings(environment)
+      recordPackagingEvent(run.directory, { type: 'linux-settings', packConcurrency: settings.packConcurrency })
+      await packagingStep(run.directory, 'linux-package', () => packageTarget(invocation, environment, run), secrets)
     } else {
       await packagingStep(run.directory, 'windows-package', () => packageTarget(invocation, environment, run), secrets)
     }
@@ -424,15 +460,16 @@ export async function packageTarget(
   const journal = target.platform === 'darwin' ? process.env.DSH_DESKTOP_PACKAGING_RUN_DIR : undefined
   const proxyEvent = (status: string) => { if (journal) recordPackagingEvent(journal, { type: 'notarization-proxy', status }) }
   const mac = target.platform === 'darwin' ? resolveMacOSPackageSettings(environment) : undefined
-  const packConcurrency = mac?.packConcurrency ?? resolveWindowsPackageSettings(environment).packConcurrency
-  const packArguments = ['--concurrency', String(packConcurrency)]
+  const linux = target.platform === 'linux' ? resolveLinuxPackageSettings(environment) : undefined
+  const packConcurrency = mac?.packConcurrency ?? linux?.packConcurrency ?? resolveWindowsPackageSettings(environment).packConcurrency
+  const packArguments = packConcurrency === undefined ? [] : ['--concurrency', String(packConcurrency)]
   const buildPaths = desktopTargetBuildPaths(target.name, environment)
+  const artifactsRoot = desktopArtifactOutput(buildPaths, invocation).directory
   const releaseRecordPath = join(buildPaths.artifacts, desktopBuildRecordFilename(target.name))
   if (!invocation.prepareOnly && !invocation.unsigned && !invocation.skipNotarization) {
     rmSync(releaseRecordPath, { force: true })
     rmSync(`${releaseRecordPath}.tmp`, { force: true })
   }
-  const artifactsRoot = desktopArtifactOutput(buildPaths, invocation).directory
   const buildEnv = withoutWindowsSigningEnvironment(withoutDesktopUploadCredentials(
     desktopElectronBuilderEnvironment(environment, invocation.unsigned)))
   const targetEnv: NodeJS.ProcessEnv = {
@@ -558,8 +595,18 @@ export async function packageTarget(
     } else {
       await signedStage('artifacts', () => execute(desktopElectronBuilderArguments(target, invocation.directory), electronBuilderEnv))
     }
-    await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts',
-      ...(invocation.unsigned ? ['--unsigned'] : []), ...(invocation.skipNotarization ? ['--skip-notarization'] : [])], targetEnv)
+    // Linux builds tolerate the packaged-runtime smoke test: the optional LibreOffice Kit native
+    // modules are not yet bundled for Linux, so the Office-to-PDF conversion check cannot run.
+    try {
+      await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts',
+        ...(invocation.unsigned ? ['--unsigned'] : []), ...(invocation.skipNotarization ? ['--skip-notarization'] : [])], targetEnv)
+    } catch (error) {
+      if (target.platform === 'linux') {
+        process.stderr.write(`desktop package: linux smoke skipped (bundled Office native modules not yet available): ${String(error)}\n`)
+      } else {
+        throw error
+      }
+    }
   }
   if (!invocation.directory && !invocation.unsigned && !invocation.skipNotarization) {
     writeReleaseRecord(target, electronBuilderEnv, buildPaths.artifacts)

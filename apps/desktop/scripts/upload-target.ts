@@ -12,7 +12,7 @@ import { desktopReleaseTag, tagDesktopRelease } from './desktop-release-tag.ts'
 import { uploadDesktopRelease } from './desktop-upload-run.ts'
 import { DesktopPurgeError, purgeDesktopInstaller, resolveDesktopPurgeConfig } from './desktop-edgeone.ts'
 
-const SUPPORTED_TARGETS = new Set<DesktopPackageTargetName>(['mac-arm64', 'mac-x64', 'win-x64'])
+const SUPPORTED_TARGETS = new Set<DesktopPackageTargetName>(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64', 'linux-arm64'])
 
 function targetName(value: string): DesktopPackageTargetName {
   if (!SUPPORTED_TARGETS.has(value as DesktopPackageTargetName)) {

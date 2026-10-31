@@ -59,14 +59,24 @@ export function createElectronBuilderConfig(
     throw new Error('desktop package: DSH_DESKTOP_UNSIGNED must be 0 or 1')
   }
   const unsigned = env.DSH_DESKTOP_UNSIGNED === '1'
-  const skipNotarization = env.DSH_DESKTOP_MACOS_SKIP_NOTARIZATION === '1'
+  // Upstream builds unsigned artifacts on Windows and macOS alike: a local artifact without
+  // release signing or notarization. Linux packages are unsigned by nature and never set the flag.
   if (env.DSH_DESKTOP_MACOS_SKIP_NOTARIZATION !== undefined && !['0', '1'].includes(env.DSH_DESKTOP_MACOS_SKIP_NOTARIZATION)) {
     throw new Error('desktop package: DSH_DESKTOP_MACOS_SKIP_NOTARIZATION must be 0 or 1')
   }
+  const skipNotarization = env.DSH_DESKTOP_MACOS_SKIP_NOTARIZATION === '1'
   if (skipNotarization && (unsigned || resolvedPlatform !== 'darwin')) throw new Error('Skipping notarization requires a signed macOS build')
   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
   const packagesWindows = resolvedPlatform === 'win32'
-  const policy = packagesMacOS && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
+  const packagesLinux = resolvedPlatform === 'linux'
+  // The mandatory-update policy is implemented for Windows and macOS only. main.ts throws
+  // "desktop policy: unsupported platform" the moment a packaged manifest carries one on any
+  // other platform, so a Linux build that ships the policy greets the user with the fatal
+  // startup dialog instead of a window. Omitting it here is what makes the Linux app
+  // launchable. Auto updates are unaffected: they read app-update.yml, not this policy.
+  // An unsigned macOS build skips the policy as well: it never publishes, and upstream drops it there too.
+  const policy = packagesMacOS && unsigned ? undefined
+    : ['win32', 'darwin'].includes(resolvedPlatform) ? resolveDesktopPolicyEnvironment(env) : undefined
   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
   const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
   if (packagesMacOS && !unsigned && !skipNotarization) resolveMacOSNotarizationEnvironment(env)
@@ -110,14 +120,14 @@ export function createElectronBuilderConfig(
     extraMetadata: {
       dshDesktopAppId: appId,
       dshDesktopUpdateChannel: update?.channel ?? 'nightly',
-      ...(policy === undefined ? {} : { dshMandatoryUpdatePolicy: policy }),
+      ...policy === undefined ? {} : { dshMandatoryUpdatePolicy: policy },
       ...buildVersion === productVersion ? {} : { version: buildVersion },
       ...packaged === undefined ? {} : { dshBuildCommit: packaged.commit, dshBuildDirty: packaged.dirty },
     },
     productName: 'DeepSeek Harness',
     // The default copyright uses author.name; this line names the product instead.
     copyright: `Copyright © ${new Date().getFullYear()} \${productName}`,
-    // Unsigned builds carry their own suffix so a shared file can never pass for a release artifact.
+    // Unsigned and notarization-skipped builds carry their own suffix so a shared file can never pass for a release artifact.
     artifactName: `deepseek-harness-\${version}-\${os}-\${arch}${output.suffix}.\${ext}`,
     directories: { output: output.directory },
     asar: true,
@@ -157,7 +167,9 @@ export function createElectronBuilderConfig(
     asarUnpack: unpack,
     extraResources: [
       { from: buildPaths.runtime, to: 'runtime' },
-      { from: fileURLToPath(new URL('../resources/icon-windows.png', import.meta.url)), to: 'icon.png' },
+      // The About panel reads resources/icon.png at runtime; Linux builds must ship the Linux icon
+      // instead of the Windows one used for tray and taskbar assets.
+      { from: fileURLToPath(new URL(packagesLinux ? '../resources/icon.png' : '../resources/icon-windows.png', import.meta.url)), to: 'icon.png' },
       // Windows tray bitmaps; macOS keeps the Dock and ships no menu bar icon.
       ...(packagesWindows ? [{ from: fileURLToPath(new URL('../resources/tray-windows.ico', import.meta.url)), to: 'tray.ico' }] : []),
     ],
@@ -169,15 +181,18 @@ export function createElectronBuilderConfig(
         CFBundleLocalizations: ['en', 'zh_CN', 'ja', 'es', 'fr', 'de', 'ru', 'pt'],
         NSMicrophoneUsageDescription: 'DeepSeek Harness uses your microphone to transcribe speech into message drafts.',
       },
-      // Ad-hoc signing keeps the modified Electron executable runnable without a Developer ID.
+      // Ad-hoc signing keeps the unsigned artifact runnable without a Developer ID.
       identity: unsigned ? '-' : macOSSigning?.signingIdentity,
       forceCodeSigning: !unsigned,
       hardenedRuntime: true,
       entitlements: fileURLToPath(new URL('./macos-entitlements.plist', import.meta.url)),
       entitlementsInherit: fileURLToPath(new URL('./macos-entitlements.plist', import.meta.url)),
-      // Prepared runtime files retain their signatures; PAK resources are sealed by their enclosing bundle.
+      // ASAR-unpacked native runtime files are pre-signed; PAK resources are sealed by their enclosing bundle.
       signIgnore: ['/Contents/Resources/app\\.asar\\.unpacked/dsh(?:/|$)', '/Contents/Resources/runtime/primary-runtime(?:/|$)', '\\.pak$'],
+      // Unsigned and notarization-skipped builds never reach Apple's notary service; packageTarget
+      // drives stapling separately for the qualified release path.
       notarize: !unsigned && !skipNotarization,
+      // An unsigned build never publishes an update feed, so it carries no ZIP updater payload.
       target: unsigned ? ['dmg'] : ['dmg', 'zip'],
     },
     dmg: {
@@ -233,6 +248,7 @@ export function createElectronBuilderConfig(
     artifactBuildCompleted: artifact => {
       if (unsigned || !artifact.file.endsWith('.dmg')) return
       if (skipNotarization) {
+        // A debugging build still verifies its own signature; it just never reaches Apple's notary service.
         verifyMacOSDiskImageSignature(artifact.file, macOSSigning ?? resolveMacOSSigningEnvironment(env))
         return
       }
@@ -253,8 +269,14 @@ export function createElectronBuilderConfig(
       target: ['nsis'],
     },
     linux: {
+      icon: fileURLToPath(new URL('../resources/icon.png', import.meta.url)),
+      executableName: 'deepseek-harness',
       category: 'Development',
-      target: ['AppImage'],
+      // deb packaging requires a maintainer; AppImage ignores it.
+      maintainer: 'DeepSeek Harness Linux maintainers <maintainers@deepseek-harness-linux.dev>',
+      synopsis: 'DeepSeek Harness desktop application for Linux',
+      // AppImage is the auto-update carrier; deb and tar.gz are additional install formats.
+      target: ['AppImage', 'deb', 'tar.gz'],
     },
     nsis: {
       uninstallDisplayName: '${productName}',

@@ -2,23 +2,32 @@
 export const DESKTOP_AUTO_UPDATE_ENV: 'DSH_DESKTOP_AUTO_UPDATE_ENV'
 
 /** Supported Desktop update deployment. */
-export type DesktopAutoUpdateEnvironment = 'test' | 'production'
+export type DesktopAutoUpdateEnvironment = 'test' | 'production' | 'selfhosted'
 
-/** Directory name of one supported Desktop release target. */
+/** Update channel embedded in the installer. */
+export type DesktopAutoUpdateChannel = 'nightly' | 'latest'
+
+/** Directory name of one officially supported Desktop release target. */
 export type DesktopAutoUpdateTarget = 'mac-arm64' | 'mac-x64' | 'win-x64'
+
+/** Directory name of a Linux release target, published by this fork's self-hosted deployment. */
+export type DesktopLinuxUpdateTarget = 'linux-x64' | 'linux-arm64'
+
+/** Every Desktop release target this fork can package, Linux included. */
+export type DesktopUpdateTarget = DesktopAutoUpdateTarget | DesktopLinuxUpdateTarget
 
 /**
  * Name the fixed installer object shared by uploading and cache refresh.
  * @param target Supported Desktop target.
  * @returns Fixed download filename.
  */
-export function desktopLatestInstallerFilename(target: DesktopAutoUpdateTarget): string
+export function desktopLatestInstallerFilename(target: DesktopUpdateTarget): string
 
 /** Public updater URL and object prefixes for one release target. */
 export interface DesktopAutoUpdateConfig {
   readonly environment: DesktopAutoUpdateEnvironment
-  readonly channel: 'nightly' | 'latest'
-  readonly target: DesktopAutoUpdateTarget
+  readonly channel: DesktopAutoUpdateChannel
+  readonly target: DesktopUpdateTarget
   readonly origin: string
   readonly publicUrl: string
   readonly keyPrefix: string
@@ -31,6 +40,13 @@ export interface DesktopUploadConfig extends DesktopAutoUpdateConfig {
   readonly secretIdEnvName: string
   readonly secretKeyEnvName: string
 }
+
+/**
+ * Resolve the channel embedded in the installer; omitted local settings retain nightly.
+ * @param env - Packaging or upload settings.
+ * @returns Validated channel.
+ */
+export function resolveDesktopUpdateChannel(env: NodeJS.ProcessEnv): DesktopAutoUpdateChannel
 
 /**
  * Resolve the update deployment, defaulting local release work to test.
@@ -50,25 +66,28 @@ export function resolveDesktopAutoUpdateEnvironment(
 export function resolveDesktopAutoUpdateTarget(
   platform: NodeJS.Platform,
   arch: string,
-): DesktopAutoUpdateTarget
+): DesktopUpdateTarget
 
 /**
  * Return the local completion record filename for one packaged target.
  * @param target - Supported release target.
  * @returns Filename stored beside electron-builder artifacts.
  */
-export function desktopBuildRecordFilename(target: DesktopAutoUpdateTarget): string
+export function desktopBuildRecordFilename(target: DesktopUpdateTarget): string
 
 /**
  * Return the electron-builder channel metadata filename for an application version.
  * @param version - Desktop semantic version.
  * @param platform - Target platform.
+ * @param channel - Selected channel; omitted means nightly.
+ * @param arch - Target architecture; Linux manifests are suffixed unless it is x64.
  * @returns Channel metadata filename emitted for the target.
  */
 export function desktopUpdateMetadataFilename(
   version: string,
   platform: NodeJS.Platform,
-  channel?: 'nightly' | 'latest',
+  channel?: DesktopAutoUpdateChannel,
+  arch?: string,
 ): string
 
 /**
@@ -98,7 +117,6 @@ export function resolveDesktopUploadConfig(
   platform: NodeJS.Platform,
   arch: string,
 ): DesktopUploadConfig
-
 /**
  * Resolve the packaged update channel, defaulting omitted local settings to nightly.
  * @param env Packaging settings.

@@ -6,6 +6,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { dump, load } from 'js-yaml'
 import type { DesktopPackageTargetName } from './package-target.ts'
+import type { DesktopAutoUpdateEnvironment } from './desktop-auto-update-environment.mjs'
 import {
   desktopBuildRecordFilename,
   desktopLatestInstallerFilename,
@@ -21,6 +22,8 @@ const TARGETS = {
   'mac-arm64': { platform: 'darwin', arch: 'arm64', os: 'mac' },
   'mac-x64': { platform: 'darwin', arch: 'x64', os: 'mac' },
   'win-x64': { platform: 'win32', arch: 'x64', os: 'win' },
+  'linux-x64': { platform: 'linux', arch: 'x64', os: 'linux' },
+  'linux-arm64': { platform: 'linux', arch: 'arm64', os: 'linux' },
 } as const satisfies Record<DesktopPackageTargetName, {
   readonly platform: NodeJS.Platform
   readonly arch: string
@@ -40,7 +43,7 @@ export interface DesktopUploadArtifact {
 
 /** A validated installer or update upload, with any channel metadata ordered last. */
 export interface DesktopUploadPlan {
-  readonly environment: 'test' | 'production'
+  readonly environment: DesktopAutoUpdateEnvironment
   readonly target: DesktopPackageTargetName
   readonly version: string
   /** Update feed directory URL, or the single installer URL for a fixed download. */
@@ -63,7 +66,7 @@ export interface DesktopUploadPlanOptions {
   readonly repositoryRoot?: string
   readonly appRoot?: string
   readonly artifactsRoot?: string
-  /** Original product version from a verified retained build; absent reads the checkout manifests. */
+  /** Override the packaged product version; CI passes the version it actually built. */
   readonly packagedProductVersion?: string
 }
 
@@ -220,7 +223,7 @@ export async function createDesktopUploadPlan(
   }
 
   if (update.channel === 'latest' && buildVersion.includes('-')) throw new Error('desktop upload: latest requires a stable version')
-  const metadataFilename = desktopUpdateMetadataFilename(buildVersion, target.platform, update.channel)
+  const metadataFilename = desktopUpdateMetadataFilename(buildVersion, target.platform, update.channel, target.arch)
   const metadataPath = join(artifactsRoot, metadataFilename)
   let metadataValue: unknown
   try {
@@ -239,7 +242,7 @@ export async function createDesktopUploadPlan(
   }
 
   const base = `deepseek-harness-${buildVersion}-${target.os}-${target.arch}`
-  const updaterExtension = target.platform === 'darwin' ? 'zip' : 'exe'
+  const updaterExtension = target.platform === 'darwin' ? 'zip' : target.platform === 'linux' ? 'AppImage' : 'exe'
   const updaterInfo = updateFileInfo(metadata.files[0], `${metadataFilename}.files[0]`, `${base}.${updaterExtension}`)
   const updaterPath = await verifyChecksummedArtifact(artifactsRoot, updaterInfo)
   const artifacts: DesktopUploadArtifact[] = []
@@ -256,8 +259,22 @@ export async function createDesktopUploadPlan(
       uploadArtifact(blockmapPath, binaryPrefix, 'application/octet-stream'),
     )
   }
+  else if (target.platform === 'linux') {
+    const blockmapPath = await requireArtifact(artifactsRoot, `${base}.AppImage.blockmap`)
+    installerArtifact = uploadArtifact(updaterPath, binaryPrefix, 'application/x-executable')
+    artifacts.push(installerArtifact)
+    artifacts.push(uploadArtifact(blockmapPath, binaryPrefix, 'application/octet-stream'))
+    // Additional install formats produced by the same electron-builder run. They are versioned
+    // binaries only: auto-update remains AppImage-only, and the fixed latest download stays the AppImage.
+    for (const [extension, contentType] of [['deb', 'application/vnd.debian.binary-package'], ['tar.gz', 'application/gzip']] as const) {
+      const path = join(artifactsRoot, `${base}.${extension}`)
+      if ((await stat(path).catch(() => undefined))?.isFile() === true) {
+        artifacts.push(uploadArtifact(path, binaryPrefix, contentType))
+      }
+    }
+  }
   else {
-    const blockmapPath = await requireArtifact(artifactsRoot, `${base}.exe.blockmap`)
+    const blockmapPath = await requireArtifact(artifactsRoot, `${base}.${updaterExtension}.blockmap`)
     installerArtifact = uploadArtifact(
       updaterPath,
       binaryPrefix,
