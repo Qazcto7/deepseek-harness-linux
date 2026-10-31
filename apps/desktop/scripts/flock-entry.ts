@@ -67,7 +67,12 @@ function hostAddonBuilt(): boolean {
     if ((error as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw error
     return false
   }
-  const manifest = JSON.parse(readFileSync(prebuilds, 'utf8')) as { readonly binaries: readonly { readonly path: string }[] }
+  const manifest = JSON.parse(readFileSync(prebuilds, 'utf8')) as { readonly binaries: readonly { readonly tool?: string; readonly libc?: string; readonly path: string }[] }
+  if (platform === 'linux') {
+    const report = process.report.getReport() as { header: { glibcVersionRuntime?: string } }
+    const libc = report.header.glibcVersionRuntime ? 'glibc' : 'musl'
+    return manifest.binaries.some(binary => binary.tool === 'flock' && binary.libc === libc && existsSync(join(dirname(prebuilds), binary.path)))
+  }
   return manifest.binaries.every(binary => existsSync(join(dirname(prebuilds), binary.path)))
 }
 
@@ -76,8 +81,11 @@ async function buildNativeSystem(): Promise<void> {
   if (pnpmEntry === undefined || pnpmEntry === '') {
     throw new Error(`desktop package: flock addon is not built; run ${BUILD_COMMAND_TEXT} or invoke this script through a pnpm package command`)
   }
+  const isJs = /\.[cm]?js$/i.test(pnpmEntry)
   for (const args of BUILD_COMMANDS) {
-    const child = spawn(process.execPath, [pnpmEntry, ...args], { cwd: REPOSITORY_ROOT, stdio: 'inherit' })
+    const command = isJs ? process.execPath : pnpmEntry
+    const cmdArgs = isJs ? [pnpmEntry, ...args] : args
+    const child = spawn(command, cmdArgs, { cwd: REPOSITORY_ROOT, stdio: 'inherit' })
     const [code, signal] = await once(child, 'close') as [number | null, NodeJS.Signals | null]
     if (code !== 0) throw new Error(`desktop package: pnpm ${args.join(' ')} exited with ${String(code ?? signal)}`)
   }
